@@ -1,0 +1,525 @@
+;--------------------------------------------------------------------------------------------------
+;	GENERAL INPUTS
+;--------------------------------------------------------------------------------------------------
+fish def _input_variables
+    _atm        = 101300.0  ; Atmospheric pressure
+    ;----------------------------------------------------------------------------------------------
+	; Primary parameters
+    ; -  Correlations & procedures for estimating Dr and Go provided in the manual
+    ;_N160   = 14.0
+    _Cd     = 46.0                         ; [Idriss & Boulanger, 2003b]
+    ;_Dr     = sqrt(_N160/_Cd)              ; Relative density in decimal
+    _N160   = math.min(46,math.max(2,46*_Dr^2))      ; Calibration to Idriss-Boulanger 2008 
+
+    ;_Go    = 677       ; Field: Calibrate to Vs data
+    ;----------------------------------------------------------------------------------------------
+	; Secondary input paramters (set to 0.0 to retain default values)
+    ;
+	_ho     =  0.0     ; Defaults to value calculated as a function of Dr
+	_emin   =  0.0     ; Defaults to 0.5
+	_emax   =  0.0     ; Defaults to 0.8
+    _nb     =  0.0     ; Defaults to 0.5
+    _nd     =  0.0     ; Defaults to 0.1
+    _Ado    =  0.0     ; Defaults to value calculated to honor Bolton's relationship
+    _zmax   =  0.0     ; Defaults to value calculated as a function of the rel. state parameter
+    _cz     =  0.0     ; Defaults to 250
+    _ce     =  0.0     ; Defaults to value calculated as a function of Dr
+    _phicv  =  0.0     ; Defaults to 33 degrees
+    _pois   =  0.0     ; Defaults to 0.3
+    _Gdegr  =  0.0     ; Defaults to 2.0
+	_CDR    =  0.0     ; Defaults to value calculated as a function of Dr
+	_Ckaf   =  0.0     ; Defaults to value calculated as a function of Dr
+	_Q      =  0.0     ; Defaults to 10.0
+	_R      =  0.0     ; Defaults to 1.5
+	_m      =  0.0     ; Defaults to 0.01
+	_Fsed   =  0.0     ; Defaults to 0.04
+	_psedo  =  0.0     ; Defaults to -Patm/5
+	_c      =  0.0     ; Defaults to value calculated as a function of Mb for TX compression.
+	_ng     =  0.0     ; Defaults to 1.0
+    
+    ; Here assigned given that model has been calibrated
+    if _Dr  = 0.35 
+       _hpo = 0.22
+       _Go = 504.0
+    end_if 
+    if _Dr  = 0.55 
+       _hpo = 0.20
+       _Go = 717.0 
+    end_if 
+    if _Dr  = 0.75 
+       _hpo = 0.15
+       _Go = 942.0
+    end_if
+    ;----------------------------------------------------------------------------------------------
+	; Water properties	
+    ;
+    _waterK     = 2.0e9
+    _waterTens  = -100.0 * _atm
+    _waterDens  = 1000.0
+	
+    ;----------------------------------------------------------------------------------------------
+	; Soil density and porosity (required zone properties) - computed from above parameters
+    ;
+	_Gs	     = 2.67
+	if _emin = 0.0
+	   _emin = 0.5
+	endif
+	if _emax = 0.0
+	   _emax = 0.8
+	endif
+	_void  		= _emax - _Dr*(_emax - _emin)
+    _dens_dry   = _Gs * _waterDens /(1.0+_void)  ; Dry density
+    _poros      = _void/(1.0+_void)              ; Porosity
+    _dens       = _dens_dry *(1.0+_void/_Gs)     ; Saturated density
+	;
+	; Or specified directly
+    ;
+    ; _poros      = 0.5
+    ; _dens       = 2000
+
+    _ko         = 1.0
+
+    ;____________________________________________________________________________________________________;
+    ;                Obtaining Go: Go can be estimated from Vs1 and Ko or specified directly             ;
+    ;____________________________________________________________________________________________________;
+    _Vs1          = 85*(_N160+2.5)^0.25                    ; Fit to Andrus-Stokoe (2000) data (m/sec)
+    ;_Vs1         = 170.0                                  ; Shear wave velocity (m/sec) - Uncomment this to specify Vs1 directly
+    ;_Go = (_dens * _Vs1^2 / _atm) / ((1.0+_ko)/2.0)^0.5    ; UCD/CGM-12/01 Report Equations 78 & 79 
+    
+    ; Activate following line if you wish to activate non-default Go value
+    ;_Go = 100.0
+    
+    ;----------------------------------------------------------------------------------------------
+	; Consolidation stress
+    ;
+    array _sigc(5)
+    _sigc(1)    = 0.25  ; atmospheres
+    _sigc(2)    = 1.0
+    _sigc(3)    = 4.0
+    _sigc(4)    = 16.0
+    _sigc(5)    = 64.0
+    
+    ;----------------------------------------------------------------------------------------------
+	; Loading parameters
+    ;
+    ;_drained   = 1         ; Switch: 1 for drained, 0 for undrained
+    _maxStrain  = 0.1
+    
+    _maxStrInc  = 1.0e-6    ; Max strain increment per time step
+    _his_step   = int( 10 * (1.0e-5)/_maxStrInc )
+    
+    _savefile = _basefile + '.sav'
+end
+[_input_variables]
+
+;=======================================================================================================;
+;                                    END OF INPUTS NEEDED BY THE USER                                   ;
+;=======================================================================================================;
+;   Create elements and initialize with 1D vertical loading
+fish def _generate_bricks
+    _length = 1	                  ; Length of element in model units of length (x) - in plane
+    _width  = 1                   ; Width  of element in model units of length (y) - out of plane
+	_height = 1					  ; Height of element in model units of length (z)
+
+    loop _n (1,5)
+        _name = string.build("Zone %1",_n)   ; Name of zone, used to assign initial/boundary conditions.
+        _xface_left = 2*(_n-1)*_length       ; x-coordinate of the left side of each element
+        _xface_right = _xface_left + _length ; x-coordinate of the rightside of each element
+        
+        ; Create cube elements with dimensions above, spaced by one length. Group by zone name.
+        ; Create set of face groups at left and right of cubes for assigning boundary/initial conditions.
+        command
+            zone create brick size [_length] [_width] [_height] point 0 ([_xface_left], 0, 0)
+            zone group [_name]      range position-x [_xface_left] [_xface_right]
+			zone face group 'Left'  range position-x [_xface_left]
+			zone face group 'Right' range position-x [_xface_right]
+        endcommand
+    endloop
+    
+    ; Create set of face groups at top, front, back, and bottom of cubes (can be grabbed simultaneously for all elements)
+	command
+		zone face group 'Bottom' range position-z 0 
+		zone face group 'Top'    range position-z [_height]
+		zone face group 'Front'  range position-y 0 
+		zone face group 'Back'   range position-y [_width]	
+	endcommand
+end
+[_generate_bricks]
+ 
+;--------------------------------------------------------------------------------------------------
+;   Assign models
+;
+zone cmodel assign pm4sand3d
+zone fluid cmodel assign isotropic
+
+;--------------------------------------------------------------------------------------------------
+;   Assign soil properties
+;
+fish def _assign_primary                         ; Assign the primary parameters
+    zone.prop(::zone.list,"dens") = _dens_dry
+    zone.prop(::zone.list,"D_r")  = _Dr
+    zone.prop(::zone.list,"G_o")  = _Go
+    zone.prop(::zone.list,"h_po") = _hpo
+    zone.prop(::zone.list,"P_atm") = _atm
+    zone.prop(::zone.list,"h_o")   = _ho
+end
+[_assign_primary]
+ 
+fish def _assign_secondary                        ; Assign the secondary parameters
+    zone.prop(::zone.list,"e_min") = _emin
+    zone.prop(::zone.list,"e_max") = _emax    
+    zone.prop(::zone.list,"n_b")   = _nb
+    zone.prop(::zone.list,"n_d")   = _nd
+    zone.prop(::zone.list,"A_do")  = _Ado
+    zone.prop(::zone.list,"z_max") = _zmax
+    zone.prop(::zone.list,"c_e")   = _ce
+    zone.prop(::zone.list,"c_z")   = _cz
+    zone.prop(::zone.list,"phi_cv") = _phicv
+    zone.prop(::zone.list,"pois")   = _pois
+    zone.prop(::zone.list,"G_degr") = _Gdegr
+    zone.prop(::zone.list,"C_DR")   = _CDR
+    zone.prop(::zone.list,"C_kaf")  = _Ckaf
+    zone.prop(::zone.list,"Q_bolt") = _Q
+    zone.prop(::zone.list,"R_bolt") = _R
+    zone.prop(::zone.list,"m_par")  = _m
+    zone.prop(::zone.list,"F_sed")  = _Fsed
+    zone.prop(::zone.list,"p_sedo") = _psedo
+	zone.prop(::zone.list,"LA_c")   = _c
+	zone.prop(::zone.list,"ng") = _ng
+end
+[_assign_secondary]
+;
+;--------------------------------------------------------------------------------------------------
+;   Assign water properties
+;
+zone water density [_waterDens]
+zone fluid property porosity [_poros]
+zone gridpoint initialize saturation 1.0
+zone gridpoint initialize pore-pressure 0              ; Start with zero pore pressures
+
+fish def _water_depending_on_version
+    if version.code.major = 900
+        command
+           zone gridpoint initialize fluid-modulus 0           ; Bulk set to zero for initialization        
+           zone gridpoint initialize fluid-tension [_waterTens]
+        endcommand
+    else
+        command
+           zone fluid property fluid-modulus 0                 ; Bulk set to zero for initialization 
+           zone fluid property effective-cutoff [_waterTens]
+           zone fluid unsaturated cutoff [_waterTens] [_waterTens]
+           zone fluid property pore-pressure-generation on
+        endcommand
+    endif
+end
+[_water_depending_on_version]
+
+;----------------------- INITIAL CONDITIONS ------------------------------------------------------------;
+; Apply conditions of symmetry on three faces
+zone face apply velocity-z 0 range group "Bottom"      ; Fix bottom of elements in z.
+zone face apply velocity-y 0 range group "Front"       ; Fix front of elements in y.
+zone face apply velocity-x 0 range group "Left"        ; Fix left of elements in x.
+
+;--------------------------------------------------------------------------------------------------
+;   Initialize stresses in elements and apply vertical pressure
+;
+fish def _initial
+	loop _n (1,5)
+		_sigv  =  _atm * _sigc(_n)           ; Calculate vertical pressure (in z) in Pa.
+		_sigh  =  _ko  * _sigv               ; Use Ko to calculate horizontal stress (x and y) in Pa.
+		_name  = string.build("Zone %1",_n)
+		command
+			zone initialize stress xx [-_sigh] yy [-_sigh] zz [-_sigv] range group [_name]
+			zone face apply stress-xx [-_sigh] range group "Right" group [_name]
+			zone face apply stress-yy [-_sigh] range group "Back"  group [_name]
+			zone face apply stress-zz [-_sigv] range group "Top"   group [_name]
+        endcommand
+	endloop
+end 
+[_initial]
+
+;--------------------------------------------------------------------------------------------------
+;	Solve for equilibrium
+;
+model dynamic active off
+model fluid active off
+model solve
+
+;--------------------------------------------------------------------------------------------------
+;   Solve for equilibrium in static mode and then in dynamic mode
+;
+model dynamic active on
+model dynamic time-total 0.0
+zone dynamic damping rayleigh 0.005 1.0
+
+model solve   ; Establishes dt, too, which is used later to compute shearing rate [_dt = dynamic.timestep]
+
+zone gridpoint initialize displacement (0,0,0)
+;zone  gridpoint initialize displacement-small (0,0,0)
+zone property First_Call=0 
+
+model dynamic time-total 0.0
+model solve dynamic time 0.0
+
+
+;--------------------------------------------------------------------------------------------------
+;   Reset Kwater prior to undrained shearing
+; 
+fish def _updateKwater
+    if _drained = 0 and version.code.major = 900 then
+        command
+            zone gridpoint initialize fluid-modulus [_waterK]
+        end_command
+    else if _drained = 0
+        command
+            zone fluid property fluid-modulus [_waterK]
+        endcommand
+    end_if
+end
+[_updateKwater]
+
+;--------------------------------------------------------------------------------------------------
+;   Histories to be recorded
+;
+history interval [_his_step] 
+model history name "mRat"     mechanical ratio
+model history name "mechtime" mechanical time
+
+fish define _histories
+	loop _n (1,5) 
+		_x = 2*_length*(_n-1)+_length 
+		command
+			; All histories at top (z) back (y) right (x) corner.
+			zone history name [string.build("xdis%1",_n)] displacement-x position ([_x],[_width],[_height])
+			zone history name [string.build("ydis%1",_n)] displacement-y position ([_x],[_width],[_height])
+			zone history name [string.build("zdis%1",_n)] displacement-z position ([_x],[_width],[_height])
+		endcommand
+	endloop
+
+	loop _n (1,5) 
+		command
+		  zone history name [string.build("pp%1",_n)]   pore-pressure zoneid [_n]
+		  zone history name [string.build("esxx%1",_n)] stress-effective quantity xx zoneid [_n]
+		  zone history name [string.build("esyy%1",_n)] stress-effective quantity yy zoneid [_n]
+		  zone history name [string.build("eszz%1",_n)] stress-effective quantity zz zoneid [_n]
+		  zone history name [string.build("sxy%1",_n)] stress-effective quantity xy zoneid [_n]
+		  zone history name [string.build("sxz%1",_n)] stress-effective quantity xz zoneid [_n]
+		  zone history name [string.build("syz%1",_n)] stress-effective quantity yz zoneid [_n]
+          zone history name [string.build("epsVol%1",_n)] strain-increment quantity vol zoneid [_n]
+		  zone history name [string.build("ex1_%1",_n)] extra index 1 source zone zoneid [_n]  ; Calculated deviator q: sigma1 - sigma3
+		  zone history name [string.build("ex2_%1",_n)] extra index 2 source zone zoneid [_n]  ; Calculated mean effective stress p'
+		  zone history name [string.build("ex3_%1",_n)] extra index 3 source zone zoneid [_n]  ; sigma1 / sigma3
+		  zone history name [string.build("ex4_%1",_n)] extra index 4 source zone zoneid [_n]  ; Definition of volumetric strain.
+
+          zone history name [string.build("step_ratio_%1",_n)] property name 'step_ratio' zoneid [_n]
+		endcommand
+	endloop
+end 
+[_histories]
+
+;--------------------------------------------------------------------------------------------------
+;   Table terms to be generated and recorded
+;   Histories are slower to export than tables, but faster for FLAC to update during model runs.
+;
+[_peakRatio = array(5)]
+[_peakPhi   = array(5)]
+[_pAtPeak   = array(5)]
+[_j = 0]
+
+fish def _table_terms 
+    _j = _j + 1
+		
+    loop _n (1,5)
+		_tab1  = 10*_n-9
+		_tab2  = 10*_n-8 
+		_tab3  = 10*_n-7
+		_tab4  = 10*_n-6
+		_tab5  = 10*_n-5
+		_tab6  = 10*_n-4
+		_tab7  = 10*_n-3
+		_tab8  = 10*_n-2
+		_tab9  = 10*_n-1
+		_tab10 = 10*_n
+
+        _sig_vo  = _atm * _sigc(_n)                ; Initial vertical stress applied to element.
+        _sig_ho  = _ko  * _sig_vo                  ; Use Ko to calculate horizontal stress (x and y) in Pa.
+        _p_c     = (_sig_vo + 2.0 *_sig_ho)/3.0    ; Initial mean consolidation stress applied to element.        
+
+        ; Find gridpoint associated with top (z) back (y) right (x) corner.
+        _top_corner = gp.near((2*_length*(_n-1)+_length,_width,_height)) 
+
+        ; Stores displacements to be converted to strains at the top corner.
+        _xdisp      = gp.disp.x(_top_corner)
+        _zdisp      = gp.disp.z(_top_corner)
+        _ydisp      = gp.disp.y(_top_corner)
+		
+        ; Get zone closest to top corner coordinates defined above and record effective stresses and pp.
+        _zptr       = zone.near((2*_length*(_n-1)+_length,_width,_height))
+        _sig_eff    = zone.stress.effective(_zptr)
+        _pp         = zone.pp(_zptr) ; FLAC sign convention is positive for compressive pore pressures
+		
+        _eps_zz     = -_zdisp/_height * 100.0 ; Axial strain. (Positive in compression.)
+        _eps_xz     =  _xdisp/_height * 100.0 ; Shear strain (in-plane)
+        _eps_yz     =  _ydisp/_height * 100.0 ; Shear strain (out-of-plane)
+        
+        ;_sig_xx     = -_sig_eff(1,1) ; Sigma 3
+        ;_sig_yy     = -_sig_eff(2,2) ; Sigma 1
+        ;_sig_zz     = -_sig_eff(3,3) ; Sigma 2 (out-of-plane)
+        ;_sig_xy     =  _sig_eff(1,2) ; Shear stress (in-plane)
+        ;_sig_xz     =  _sig_eff(1,3) ; Shear stress (out-of-plane): should be ~0
+        ;_sig_yz     =  _sig_eff(2,3) ; Shear stress (out-of-plane): should be ~0
+
+        _sig_xx     = -zone.stress.effective.xx(_zptr)
+        _sig_yy     = -zone.stress.effective.yy(_zptr)
+        _sig_zz     = -zone.stress.effective.zz(_zptr)  ; vertical effective stress
+        _sig_xy     = -zone.stress.effective.xy(_zptr)  ; shear stress (out-of-plane)
+        _sig_xz     = -zone.stress.effective.xz(_zptr)  ; shear stress (in-plane)
+        _sig_yz     = -zone.stress.effective.yz(_zptr)  ; shear stress (out-of-plane)
+        
+		zone.extra(_zptr,1) = zone.stress.max(_zptr) - zone.stress.min(_zptr)            ; Calculated deviator q: sigma1 - sigma3
+		zone.extra(_zptr,2) = (_sig_xx + _sig_yy + _sig_zz) / 3                          ; Calculated mean effective stress p'
+		zone.extra(_zptr,3) = (zone.stress.min(_zptr)+_pp)/(zone.stress.max(_zptr)+_pp)  ; sigma1 / sigma3
+		zone.extra(_zptr,4) = ((_xdisp/_length) + (_ydisp/_width) + (_zdisp/_height)) * 100      ; Definition of volumetric strain.
+		zone.extra(_zptr,5) = ((math.atan(math.sqrt(zone.extra(_zptr,3)))/math.degrad)-45.0)*2.0 ; Friction angle (deg).
+
+        ; Store terms in tables. Pulled to text files at the end of model run.
+	    table.x(_tab1,_j) = _eps_xz
+        table.y(_tab1,_j) = _eps_yz
+        table.x(_tab2,_j) = _eps_zz
+        table.y(_tab2,_j) = _sig_xz / _sig_vo
+        table.x(_tab3,_j) = _sig_zz / _sig_vo
+        table.y(_tab3,_j) = _sig_vo / _atm
+        table.x(_tab4,_j) = _sig_xz
+        table.y(_tab4,_j) = _sig_yz
+        table.x(_tab5,_j) = _sig_xy
+        table.y(_tab5,_j) = _sig_xx
+        table.x(_tab6,_j) = _sig_yy
+        table.y(_tab6,_j) = _sig_zz
+		table.x(_tab7,_j) = dynamic.time.total
+        table.y(_tab7,_j) = _pp
+		table.x(_tab8,_j) = zone.extra(_zptr,1)/_atm ; sig1-sig3 (q)
+        table.y(_tab8,_j) = zone.extra(_zptr,2)/_atm ; p
+		table.x(_tab9,_j) = zone.extra(_zptr,3)      ; sig1/sig3
+        table.y(_tab9,_j) = zone.extra(_zptr,4)      ; volumetric strain in %
+        table.x(_tab10,_j)= zone.extra(_zptr,5)      ; phi mobilized
+        table.y(_tab10,_j) = _p_c/ _atm               ; consolidation mean stress (atm)
+
+        ; Check if stress ratio has increased since last call of function; store if so.
+        if zone.extra(_zptr,3) > _peakRatio(_n)
+            _pAtPeak(_n) = zone.extra(_zptr,2) /_atm
+        endif
+		_peakRatio(_n)  = math.max(zone.extra(_zptr,3),_peakRatio(_n))
+		_peakPhi(_n)    = math.max(zone.extra(_zptr,5),_peakPhi(_n))
+
+		;_peakRatio(_n)  = math.max(math.abs(_sig_yy/_sig_xx),_peakRatio(_n))
+    endloop
+end 
+[_table_terms]      ; Call function a first time to add in values at the zero time step post-equilibrium
+
+; Add function to callbacks at the END of each cycle ("101") at an interval equivalent to when histories are called.
+fish callback add @_table_terms 101 interval [_his_step]
+
+;--------------------------------------------------------------------------------------------------
+;   Impose monotonic loading
+;   -  Solve for his_steps prior to shearing so the histories include the the initial conditions
+;
+[_dt          = dynamic.timestep]
+[_capVel    = _maxStrInc * _height / _dt]      ;  Velocity needed to apply strain per timestep
+[_tfinal    = _maxStrain * _height / _capVel]  ; Time to stop dynamic solve based on calculated velocity.
+[_Compr_Ext = 1]
+[_capVel    = - _Compr_Ext * _capVel]          ; neg for compression and pos for extension
+
+zone face apply velocity-z 0.0 range group 'Top' 
+model solve time [_his_step*_dt]
+
+zone face apply velocity-z [_capVel] range group 'Top' 
+model solve dynamic time [_tfinal]    
+
+;----------------------------------------------------------------------------------------------------------------
+;  Outputting of time histories for the 5 elements
+;  Will export one .csv for each element with data for: shear strains(%), vertical (volumetric) strain(%), 
+;  pore pressures, normalized vertical effective stress, normalized effective shear stress, effective normal stresses, 
+;  effective shear stresses, initial vertical effective stress, dynamic time, p, q, and sig1/sig3.
+;                                                                                
+fish define _result_files 
+    _size = table.size(1)
+
+	loop _n (1,5) 
+		_file = _basefile + string(_n) + '.csv' 
+		_check = file.open.check(_file,'write','text')
+		if _check
+			_filePtr = file.open(_file,'write','text')
+		endif
+
+		_data = list.create(1) ; Used again later. Set here to match table below. 
+		
+		_data(1) =            'eps_xz(%),eps_yz(%),eps_zz(%),sig_xz/sig_vo,sig_zz/sig_vo,'
+		_data(1) = _data(1) + 'sig_vo,sig_xz,sig_yz,sig_xy,sig_xx,sig_yy,sig_zz,'
+        _data(1) = _data(1) + 'time,pp,q,p,sig_1/sig_3,eps_vol(%),phi_mob,p_c(atm)'
+		
+		if _check
+		   _status = file.write(_data,_filePtr) 
+		endif 
+		
+		_tab1  = 10*_n-9
+		_tab2  = 10*_n-8 
+		_tab3  = 10*_n-7
+		_tab4  = 10*_n-6
+		_tab5  = 10*_n-5
+		_tab6  = 10*_n-4
+		_tab7  = 10*_n-3
+		_tab8  = 10*_n-2
+		_tab9  = 10*_n-1
+		_tab10 = 10*_n
+
+		loop _i (1,_size) 
+			_data(1) =            string.build('%1,%2,' ,table.x(_tab1,_i), table.y(_tab1,_i))
+			_data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab2,_i), table.y(_tab2,_i))        
+			_data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab3,_i), table.y(_tab3,_i))
+			_data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab4,_i), table.y(_tab4,_i))
+			_data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab5,_i), table.y(_tab5,_i))
+			_data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab6,_i), table.y(_tab6,_i))
+			_data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab7,_i), table.y(_tab7,_i))
+			_data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab8,_i), table.y(_tab8,_i))
+			_data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab9,_i), table.y(_tab9,_i))
+			_data(1) = _data(1) + string.build('%1,%2' ,table.x(_tab10,_i), table.y(_tab10,_i))
+			
+			if _status
+				_status = file.write(_data,_filePtr) 
+			endif 
+		endloop 
+		
+		_status = file.close(_filePtr)
+	endloop 
+end        
+[_result_files]
+
+;---------------------------------------------------------------------------------------------------
+; Outputting the summary file of peak resistances
+; Exports one .csv file containing information on each element with info on: 
+; relative density, initial vertical effective stress, peak stress ratio during the model run, and 
+; a peak friction angle calculated based on the peak stress ratio.   
+;
+fish define _peakPHIout 
+	_file  = _basefile + 'peakphi.csv' 
+	_check = file.open.check(_file,'write','text')
+	if _check
+		_filePtr = file.open(_file,'write','text')
+	endif
+	_data    = list.create(1) 
+	_data(1) = 'Dr,sigvo(atm),peak_stress_ratio,peak_phi,p_at_peak_phi(atm)' 
+
+	if _check
+	   _status = file.write(_data,_filePtr) 
+	endif   
+	loop _n (1,5)
+		 _data(1) = string.build('%1,%2,%3,%4,%5',_Dr,_sigc(_n),_peakRatio(_n),_peakPhi(_n),_pAtPeak(_n))
+		 if _status
+			_status = file.write(_data,_filePtr)
+		 endif 
+	endloop 
+	_status = file.close(_filePtr)
+end 
+[_peakPHIout]
+
+model save @_savefile   ; Final save. Useful when running batch files.

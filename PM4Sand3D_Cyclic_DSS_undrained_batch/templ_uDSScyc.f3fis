@@ -1,0 +1,35 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;  
+;                           PM4Sand3D - Undrained Cyclic DSS testing                                     ;  
+;          Five elements subjected to uniform stress cyclic loading at 5 different uniform CSRs          ;
+;--------------------------------------------------------------------------------------------------------;
+;   - Strain controlled loading imposed by applying a strain rate                                        ;
+;   - Stress controlled reversal criteria (CSR)                                                          ;
+;   - CSR of 3rd element specified as CRR and CSRs of the other 4 are respectively scaled                ;
+;   - Can be used to obtain CSR vs Ncyc curves for various conditions                                    ;
+;   - Exports 6 csv files: 5 containing time histories for each element & 1 summarizing the number of    ;
+;     cycles it took to reach 3 different failure criteria for each element: 98% excess pore water pres- ;
+;     sure ratio, 1% shear strain, 3% shear strain                                                       ;
+;   - User must input 3 parameters (hpo, Dr, Go) at a minimum plus atmospheric pressure.                 ;
+;     - for batching, I assume Go is a function of Vs1 = f(N160) = f(Dr) and hpo is already calibrated   ;
+;   - Units currently used in this example are Pascals and kilograms; user must be careful to use        ;
+;     consistent units                                                                                   ;
+;--------------------------------------------------------------------------------------------------------;
+;      Ross W Boulanger, Katerina Ziotopoulou, Marie Kippen - 2025                                       ;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ 
+;------------MODEL OPTIONS-------------------------------------------------------------------------------;
+model new
+model title "Cyclic undrained DSS (batched)"
+model configure dynamic 
+model configure fluid 
+model large-strain off
+program echo off
+
+def _version_checking
+   if version.code.major = 900
+      command
+       model configure plugins
+      endcommand
+   endif
+end
+[_version_checking]

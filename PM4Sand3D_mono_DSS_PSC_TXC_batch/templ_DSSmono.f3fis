@@ -1,0 +1,26 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;   Monotonic DSS loading - PM4Sand3D
+;   -----------------------------------------------------------------------------------------------
+;   Five elements at 5 different confiments subjected to monotonic strain-controlled shearing
+;   - exports 5 csv files containing time histories for each element
+;   - exports 1 csv file summarizing peak stress ratios and mobilized friction angles
+;   - option for drained or undrained loading
+;   -----------------------------------------------------------------------------------------------
+;   Ross W Boulanger, Katerina Ziotopoulou, Marie Kippen - 2025
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+model new
+model title "Monotonic DSS"
+model configure fluid
+model configure dynamic
+model large-strain off
+
+def _version_checking
+   if version.code.major = 900
+      command
+       model configure plugins
+      endcommand
+   endif
+end
+[_version_checking]

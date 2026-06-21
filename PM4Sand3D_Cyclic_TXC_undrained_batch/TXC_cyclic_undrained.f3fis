@@ -1,0 +1,632 @@
+
+fish define _input_variables
+    _atm    = 101300.0  ; Atmospheric pressure
+    ;----------------------------------------------------------------------------------------------
+	; Primary parameters
+	; -  Correlations & procedures for estimating Dr and Go provided in the manual
+	;_N160   = 14.0
+    _Cd     = 46.0                                   ; [Idriss & Boulanger, 2003b]
+    ;_Dr     = sqrt(_N160/_Cd)                       ; Relative density in decimal
+    _N160   = math.min(46,math.max(2,46*_Dr^2))      ; Calibration to Idriss-Boulanger 2008 
+
+    ;____________________________________________________________________________________________________;
+    ;   Assigning hpo : this parameter is varied by user until the desired cyclic strength is obtained   ;
+    ;____________________________________________________________________________________________________;
+    ; Here assigned given that model has been calibrated
+    if _Dr  = 0.35 
+       _hpo = 0.22
+       _Go = 504.0
+       _CSR_mid = 0.135
+    end_if 
+    if _Dr  = 0.55 
+       _hpo = 0.20
+       _Go = 717.0 
+       _CSR_mid = 0.221
+    end_if 
+    if _Dr  = 0.75 
+       _hpo = 0.15
+       _Go = 942.0
+       _CSR_mid = 0.468
+    end_if
+    ;____________________________________________________________________________________________________;
+    ;   Sand properties: Secondary parameters (set to 0.0 if you want to retain defaults)
+    ;____________________________________________________________________________________________________;
+    ; Secondary input paramters (set to 0.0 to retain default values)
+    _ho     =  0.0     ; Defaults to value calculated as a function of Dr
+    _emin   =  0.0     ; Defaults to 0.5
+    _emax   =  0.0     ; Defaults to 0.8
+    _nb     =  0.0     ; Defaults to 0.5
+    _nd     =  0.0     ; Defaults to 0.1
+    _Ado    =  0.0     ; Defaults to value calculated to honor Bolton's relationship
+    _zmax   =  0.0     ; Defaults to value calculated as a function of the rel. state parameter
+    _cz     =  0.0     ; Defaults to 250
+    _ce     =  0.0     ; Defaults to value calculated as a function of Dr
+    _phicv  =  0.0     ; Defaults to 33 degrees
+    _pois   =  0.0     ; Defaults to 0.3
+    _Gdegr  =  0.0     ; Defaults to 2.0
+    _CDR    =  0.0     ; Defaults to value calculated as a function of Dr
+    _Ckaf   =  0.0     ; Defaults to value calculated as a function of Dr
+    _Q      =  0.0     ; Defaults to 10.0
+    _R      =  0.0     ; Defaults to 1.5
+    _m      =  0.0     ; Defaults to 0.01
+    _Fsed   =  0.0     ; Defaults to 0.04
+    _psedo  =  0.0     ; Defaults to -Patm/5
+    _c      =  0.0     ; Defaults to value calculated as a function of Mb
+    _ng     =  0.0     ; Defaults to 1.0
+    ;
+    ;____________________________________________________________________________________________________;
+    ;                                     Water Properties                                               ;
+    ;____________________________________________________________________________________________________;
+    _waterK     = 2.0e9          ; Water bulk modulus (Pa)
+    _waterTens  = -1.0*_atm      ; Water tension cut-off
+    _waterDens  = 1000.0         ; Density of water (kg/m^3) 
+	;
+    ;----------------------------------------------------------------------------------------------
+	; Soil density, void ratio, and porosity (required zone properties)
+	; -  Computed from above parameters as follows
+	_Gs	     = 2.67	; Specific gravity
+	if _emin = 0.0
+	   _emin = 0.5
+	end_if
+	if _emax = 0.0
+	   _emax = 0.8
+	end_if
+
+	_void  		= _emax - _Dr*(_emax - _emin)
+    _dens_dry   = _Gs * _waterDens /(1.0+_void)  ; Dry density
+    _poros      = _void/(1.0+_void)              ; Porosity
+    _rho_s      = _dens_dry *(1.0+_void/_Gs)        ; Saturated density
+	;
+    _ko         = 1.0          ; Lateral earth pressure coefficient at rest
+
+    ;----------------------------------------------------------------------------------------------
+	;____________________________________________________________________________________________________;
+    ;                Obtaining Go: Go can be estimated from Vs1 and Ko or specified directly             ;
+    ;____________________________________________________________________________________________________;
+    _Vs1          = 85*(_N160+2.5)^0.25                         ; Fit to Andrus-Stokoe (2000) data (m/sec)
+    ;_Vs1         = 170.0                                       ; Shear wave velocity (m/sec) - Uncomment this to specify Vs1 directly
+    ;_Go = (_rho_s * _Vs1^2 / _atm) / ((1.0+2.0*_ko)/3.0)^0.5    ; UCD/CGM-12/01 Report Equations 78 & 79 
+    
+    ;Activate following line if you wish to activate non-default Go value
+    ;_Go = 100.0
+    
+    ; CSR for 3rd element - Herein computed from I&B 2008 (Eqn 70) and set as the CRR
+    ;_CSR_mid_ss    = math.exp((_N160/14.1) + (_N160/126)^2 - (_N160/23.6)^3 + (_N160/25.4)^4 - 2.8)
+    ;_Ko_SS         = 0.5
+    ;_TX_2_SS       = (1.0 + 2.0*_Ko_SS)/3.0
+    ;_CSR_mid       = _CSR_mid / _TX_2_SS
+end
+[_input_variables]
+
+;========================================================================================================;
+;                                    END OF INPUTS NEEDED BY THE USER                                    ;
+;========================================================================================================;
+fish def _calc_variables
+    
+    array _CSR_limit(5)  
+     _CSR_limit(1)  = _CSR_mid / 1.3  ; This must be the smallest CSR for algorithm to work properly
+     _CSR_limit(2)  = _CSR_mid / 1.1
+     _CSR_limit(3)  = _CSR_mid
+     _CSR_limit(4)  = _CSR_mid * 1.1
+     _CSR_limit(5)  = _CSR_mid * 1.3
+    
+    _drained      = 0               ; Switch: 1 for drained, 0 for undrained
+    _maxStrain    = 0.08            ; Cut-off of cyclic loading based on maximum strain
+    _maxCycles    = 300             ; Cut-off of cyclic loading based on number of cycles
+    _maxStrInc    = 1e-6            ; 10^-6 recommended. Used to calculate loading velocity.    
+    _his_steps    = math.max(10, int(1 * (1.0e-5)/_maxStrInc ))  ; Number of solutions steps to every store history value 
+    _his_steps    = 25              ; Number of solutions steps to every store history value 
+
+     ; Calculate anisotropy to achieve initial static shear stress bias. Used this way to allow comparison with DSS driver.
+    if _phicv = 0.0
+       _phicv = 33.0
+    endif
+    _phi_r = math.degrad * _phicv
+
+    ; Initial added deviatoric stress in atmospheres for anisotropic test. Zero for isotropic.
+    _q_ani = (_static_bias * _sig_cell) / (math.cos(_phi_r) - _static_bias * (1-math.sin(_phi_r)))
+    
+    _sig_1o  = -_atm * (_sig_cell + _q_ani)    ; Calculate vertical stress (in z) in Pa. Negative for FLAC.
+    _sig_3o  =  _ko  * _sig_1o                 ; Calculate horizontal stress (x and y) in Pa. Negative for FLAC.
+    _p_co    = -(_sig_1o+ 2*_sig_3o)/3.0       ; mean stress at consolidation, positive, in Pa. Positive for normalizing ratios later...
+
+    ;----------------------------------------------------------------------------------------------
+    ; Output file base name
+    ;----------------------------------------------------------------------------------------------
+    _savefile      = _basefile + '.sav' 
+end
+[_calc_variables]
+
+;--------------------------------------------------------------------------------------------------
+;   Create elements and initialize with 1D vertical loading
+;
+fish define _generate_bricks
+    _length = 1                   ; Length of element in model units of length (x) - in plane
+    _width  = 1                   ; Width  of element in model units of length (y) - out of plane
+    _height = 1                   ; Height of element in model units of length (z) - height of element
+    
+    loop _n (1,5)
+        _name        = string.build("Zone %1",_n)    ; Name of zone, used to assign initial/boundary conditions.
+        _xface_left  = 2*(_n-1)*_length              ; x-coordinate of the left side of each element
+        _xface_right = _xface_left + _length         ; x-coordinate of the rightside of each element
+        
+        ; Create cube elements with dimensions above, spaced by one length. Group by zone name.                                                                                    
+        ; Add groupings for faces to help set boundary/initial conditions.
+        command
+            zone create brick size [_length] [_width] [_height] point 0 ([_xface_left], 0, 0)
+            zone group [_name] range position-x [_xface_left] [_xface_right]
+            zone face group 'Left'  range position-x [_xface_left]
+            zone face group 'Right' range position-x [_xface_right]
+        endcommand
+    endloop
+    
+    ; Create set of face groups at top, front, back, and bottom of cubes (can be grabbed simultaneously for all elements)
+    command
+        zone face group 'Bottom' range position-z 0 
+        zone face group 'Top'    range position-z [_height]
+        zone face group 'Front'  range position-y 0 
+        zone face group 'Back'   range position-y [_width]
+    endcommand
+end
+[_generate_bricks]
+
+;--------------------------- MATERIAL PROPERTIES--------------------------------------------------------;
+;   Assign models
+;
+zone cmodel assign pm4sand3d
+zone fluid cmodel assign isotropic
+
+;--------------------------------------------------------------------------------------------------
+;   Assign soil properties
+;
+fish define _assign_primary                         ; Assign the primary parameters
+    zone.prop(::zone.list,"dens") = _dens_dry
+    zone.prop(::zone.list,"D_r")  = _Dr
+    zone.prop(::zone.list,"G_o")  = _Go
+    zone.prop(::zone.list,"h_po") = _hpo
+    zone.prop(::zone.list,"P_atm") = _atm
+end
+[_assign_primary]
+ 
+fish define _assign_secondary                          ; Assign the secondary parameters
+    zone.prop(::zone.list,"h_o")   = _ho
+    zone.prop(::zone.list,"e_min") = _emin
+    zone.prop(::zone.list,"e_max") = _emax    
+    zone.prop(::zone.list,"n_b")   = _nb
+    zone.prop(::zone.list,"n_d")   = _nd
+    zone.prop(::zone.list,"A_do")  = _Ado
+    zone.prop(::zone.list,"z_max") = _zmax
+    zone.prop(::zone.list,"c_e")   = _ce
+    zone.prop(::zone.list,"c_z")   = _cz
+    zone.prop(::zone.list,"phi_cv") = _phicv
+    zone.prop(::zone.list,"pois")   = _pois
+    zone.prop(::zone.list,"G_degr") = _Gdegr
+    zone.prop(::zone.list,"C_DR")   = _CDR
+    zone.prop(::zone.list,"C_kaf")  = _Ckaf
+    zone.prop(::zone.list,"Q_bolt") = _Q
+    zone.prop(::zone.list,"R_bolt") = _R
+    zone.prop(::zone.list,"m_par")  = _m
+    zone.prop(::zone.list,"F_sed")  = _Fsed
+    zone.prop(::zone.list,"p_sedo") = _psedo
+    zone.prop(::zone.list,"LA_c")   = _c
+    zone.prop(::zone.list,"ng")     = _ng
+end
+[_assign_secondary]
+
+;
+;--------------------------------------------------------------------------------------------------
+;   Assign water properties
+;
+zone water density [_waterDens]
+zone fluid property porosity  [_poros]
+zone gridpoint initialize pore-pressure 0                       ; Start with zero pore pressure
+zone gridpoint initialize saturation    1.0
+
+fish def _water_depending_on_version
+    if version.code.major = 900
+        command
+           zone gridpoint initialize fluid-modulus 0            ; Bulk set to zero for initialization        
+           zone gridpoint initialize fluid-tension [_waterTens]
+        endcommand
+    else
+        command
+           zone fluid property fluid-modulus 0                  ; Bulk set to zero for initialization 
+           zone fluid property effective-cutoff [_waterTens]
+           zone fluid unsaturated cutoff [_waterTens] [_waterTens]
+           zone fluid property pore-pressure-generation on
+        endcommand
+    endif
+end
+[_water_depending_on_version]
+
+;--------------------------------------------------------------------------------------------------
+;   Initialize stresses and apply cell pressure
+;
+zone face apply velocity-x 0 range group "Left"        ; Fix left of elements in x.
+zone face apply velocity-y 0 range group "Front"       ; Fix front of elements in y.
+zone face apply velocity-z 0 range group "Bottom"      ; Fix bottom of elements in z.
+
+fish define _initial
+    loop _n (1,5)
+        _name    = string.build("Zone %1",_n)
+        ; Apply initial stresses in elements and apply vertical force for equilibium.
+        command
+            zone initialize stress xx [_sig_3o] yy [_sig_3o] zz [_sig_1o] range group [_name]
+            zone face apply stress-zz [_sig_1o] range group "Top"    group [_name]
+            zone face apply stress-xx [_sig_3o] range group "Right"  group [_name]
+            zone face apply stress-yy [_sig_3o] range group "Back"   group [_name]
+        endcommand
+    endloop
+end 
+[_initial]
+
+;--------------------------------------------------------------------------------------------------
+;   Solve for equilibrium
+;
+model dynamic active off
+model fluid active off
+model solve
+
+zone property First_Call=0
+
+;--------------------- POST-EQULIBRIUM UPDATES ---------------------------------------------------------;
+model dynamic active on
+model dynamic time-total 0.0
+zone gridpoint initialize displacement (0,0,0)
+zone dynamic damping rayleigh 0.005 1.0
+
+;--------------------------------------------------------------------------------------------------
+;   Reset Kwater prior to undrained shearing
+;
+fish def _updateKwater
+    if version.code.major = 900 then
+        command
+            zone gridpoint initialize fluid-modulus [_waterK]
+        end_command
+    else
+        command
+            zone fluid property fluid-modulus [_waterK]
+        endcommand
+    end_if
+end
+[_updateKwater]
+
+;--------------------------------------------------------------------------------------------------
+;   Prepare for dynamic loading
+;
+model step 1
+
+[_dt = dynamic.timestep]
+[_capVel = _maxStrInc * _height / _dt]
+
+model dynamic time-total 0.0
+zone gridpoint initialize displacement (0,0,0)
+
+;--------------------------------------------------------------------------------------------------
+;   Histories 
+;             
+history interval [_his_steps] ; Set interval at which histories will be stored by FLAC.                                                                            
+model history name "mRat"     mechanical ratio
+model history name "mechtime" mechanical time
+model history name "time"     dynamic    time-total
+
+fish define _histories
+    loop _n (1,5) 
+        _x = 2*_length*(_n-1)+_length 
+        command
+            zone history name [string.build("xdis_%1",_n)] displacement-x position ([_x],[_width],[_height])
+            zone history name [string.build("ydis_%1",_n)] displacement-y position ([_x],[_width],[_height])
+            zone history name [string.build("zdis_%1",_n)] displacement-z position ([_x],[_width],[_height])
+        endcommand
+    endloop
+
+    loop _n (1,5) 
+        command
+          zone history name [string.build("pp_%1",_n)]   pore-pressure zoneid [_n]
+          zone history name [string.build("esxx_%1",_n)] stress-effective quantity xx zoneid [_n]
+          zone history name [string.build("esyy_%1",_n)] stress-effective quantity yy zoneid [_n]
+          zone history name [string.build("eszz_%1",_n)] stress-effective quantity zz zoneid [_n]
+          zone history name [string.build("sxy_%1",_n)]  stress-effective quantity xy zoneid [_n]
+          zone history name [string.build("sxz_%1",_n)]  stress-effective quantity xz zoneid [_n]
+          zone history name [string.build("syz_%1",_n)]  stress-effective quantity yz zoneid [_n]
+          zone history name [string.build("ex1_%1",_n)]  extra index 1 source zone zoneid [_n]    ; p'
+          zone history name [string.build("ex2_%1",_n)]  extra index 2 source zone zoneid [_n]    ; q/2
+          zone history name [string.build("ex3_%1",_n)]  extra index 3 source zone zoneid [_n]    ; Excess pore water pressure
+          zone history name [string.build("ex4_%1",_n)]  extra index 4 source zone zoneid [_n]    ; volumetric strain % 
+        
+          zone history name [string.build("step_ratio_%1",_n)] property name 'step_ratio' zoneid [_n]
+        endcommand
+    endloop
+end 
+[_histories]
+
+;--------------------------------------------------------------------------------------------------
+;   Arrays declared
+;
+fish define _loading_parameters
+    array _cycNum(5) _Liq_1(5)   _Liq_2(5) _Liq_3(5)  _Liq_4(5)  
+    array _eps_ax(5) _eps_max(5) _ru(5)    _ruMax(5)  _SRlast(5)  _pRatio(5) _SR(5)
+end
+[_loading_parameters]
+
+;--------------------------------------------------------------------------------------------------
+;   Table terms to be generated and recorded 
+;
+[_j = 0]
+
+fish define _table_terms 
+    _j     = _j + 1
+
+    loop _n (1,5)
+        _tab1  = 9*_n-8
+        _tab2  = 9*_n-7 
+        _tab3  = 9*_n-6
+        _tab4  = 9*_n-5
+        _tab5  = 9*_n-4
+        _tab6  = 9*_n-3
+        _tab7  = 9*_n-2
+        _tab8  = 9*_n-1
+        _tab9  = 9*_n
+    
+        ; Find gridpoint associated with top (y) back (z) right (x) corner.
+        _top_corner = gp.near((2*_length*(_n-1)+_length,_width,_height)) 
+
+        ; Stores displacements to be converted to strains at the top corner.
+        _xdisp      = gp.disp.x(_top_corner)
+        _ydisp      = gp.disp.y(_top_corner)
+        _zdisp      = gp.disp.z(_top_corner)
+        
+        ; Get zone closest to top corner coordinates defined above and record effective stresses and pp.
+        _zptr       = zone.near((2*_length*(_n-1)+_length,_width,_height))
+        _pp         = zone.pp(_zptr) ; FLAC sign convention is positive for compressive pore pressures
+        
+        _eps_xx     =  -_xdisp/_length * 100.0  ; Radial strain. (Positive in compression.)
+        _eps_yy     =  -_ydisp/_width * 100.0   ; Radial strain. (Positive in compression.)
+        _eps_zz     =  -_zdisp/_height * 100.0  ; Axial strain.  (Positive in compression.)
+        
+        _sig_xx     = -zone.stress.effective.xx(_zptr)
+        _sig_yy     = -zone.stress.effective.yy(_zptr)
+        _sig_zz     = -zone.stress.effective.zz(_zptr)
+        _sig_xy     =  zone.stress.effective.xy(_zptr)
+        _sig_xz     =  zone.stress.effective.xz(_zptr)
+        _sig_yz     =  zone.stress.effective.yz(_zptr)
+
+        ;zone.extra(_zptr,1) = _cycNum(_n)                            ; Number of loading cycles at element.
+        zone.extra(_zptr,1) = (_sig_xx + _sig_yy + _sig_zz)/3/_atm    ; mean eff stress, p' (atm)
+        zone.extra(_zptr,2) = (_sig_zz - _sig_xx)/2/_atm              ; q/2 (atm)
+        zone.extra(_zptr,3) = _ru(_n)                                 ; Excess pore water pressure                                  
+        zone.extra(_zptr,4) = (_eps_xx + _eps_yy + _eps_zz) * 100     ; volumetric strain % 
+
+        ; Store terms in tables. Pulled to text files at the end of model run. #1-45                       
+        table.x(_tab1,_j) = _cycNum(_n)
+        table.y(_tab1,_j) = _sig_xx
+        table.x(_tab2,_j) = _sig_yy
+        table.y(_tab2,_j) = _sig_zz
+        table.x(_tab3,_j) = _eps_xx
+        table.y(_tab3,_j) = _eps_yy
+        table.x(_tab4,_j) = _eps_zz
+        table.y(_tab4,_j) = _sig_xy
+        table.x(_tab5,_j) = _sig_xz
+        table.y(_tab5,_j) = _sig_yz
+        table.x(_tab6,_j) = _pRatio(_n)
+        table.y(_tab6,_j) = _SR(_n)
+        table.x(_tab7,_j) = _pp
+        table.y(_tab7,_j) = zone.extra(_zptr,1) ; p'
+        table.x(_tab8,_j) = zone.extra(_zptr,2) ; q/2
+        table.y(_tab8,_j) = zone.extra(_zptr,3) ; Excess pore water pressure
+        table.x(_tab9,_j) = zone.extra(_zptr,4) ; volumetric strain %   
+        table.y(_tab9,_j) = dynamic.time.total
+    endloop
+end 
+[_table_terms]      ; Call function a first time to add in values at the zero time step post-equilibrium
+                                                                                                                           
+; Add function to callbacks at the END of each cycle ("101") at an interval equivalent to when histories are called.
+fish callback add @_table_terms 101 interval [_his_steps]
+
+;--------------------------------------------------------------------------------------------------
+;   def function for controlling cyclic loads and computing fish history variables
+
+fish define _CSR_control
+    loop _n (1,5)
+        _name        = string.build("Zone %1",_n)
+        ;==========================================================================
+        _top_corner      = gp.near((2*_length*(_n-1)+_length,_width,_height))
+        _zdisp           = gp.disp.z(_top_corner)
+        _top_corner_zptr = zone.near((2*_length*(_n-1)+_length,_width,_height))
+        _pp              = zone.pp(_top_corner_zptr)
+
+        _ru(_n)      = -_pp / _sig_3o                                    ; r_u =  delta u / sig'3c
+        _ruMax(_n)   = math.max(_ru(_n),_ruMax(_n))                      ; Track max excess pore water pressure ratio
+        
+        _eps_ax(_n)  = -_zdisp/_height                                   ; Axial strain, positive in compression
+        _eps_max(_n) = math.max(_eps_max(_n),math.abs(_eps_ax(_n)))      ; Track maximum strain
+        
+        _pRatio(_n)  = -(zone.stress.effective.xx(_top_corner_zptr)+zone.stress.effective.yy(_top_corner_zptr)+zone.stress.effective.zz(_top_corner_zptr))/3.0/_p_co ; p'/p'c
+        _SR(_n)      = -(zone.stress.effective.zz(_top_corner_zptr)-zone.stress.effective.xx(_top_corner_zptr)) / 2.0/ _p_co                                         ; CSR = q_cyc / 2 * p'c
+        _SR_initial  = _q_ani / (2.0 * _sig_cell)
+
+        ;==========================================================================
+        if _SR(_n) > _CSR_limit(_n) + _SR_initial   ; Change velocity sign and impose 1/2 cycle increment
+           if _SRLast(_n) <= _SR_initial            ; Check last reversal
+            if _eps_max(_n) < _maxStrain
+               system.command(string.build("zone face apply velocity-z [_capVel] range group [_name] group 'Top'"))
+               _cycNum(_n)  = _cycNum(_n)+0.5
+               _SRlast(_n)  = _SR(_n)
+            endif
+           endif
+        endif
+        
+        if _SR(_n) < -_CSR_limit(_n) + _SR_initial  ; Change velocity sign and impose 1/2 cycle increment
+           if _SRLast(_n) >= _SR_initial            ; Check last reversal
+            if _eps_max(_n) < _maxStrain
+               system.command(string.build("zone face apply velocity-z [-_capVel] range group [_name] group 'Top'"))
+               _cycNum(_n)  = _cycNum(_n)+0.5
+               _SRlast(_n)  = _SR(_n)
+            endif
+           endif
+        endif  
+        ;==========================================================================
+        if _ruMax(_n) < 0.98                 ; Pore pressure criteria
+            _Liq_1(_n) = _cycNum(_n) + 0.5   ; Failure occurs 0.5 cycles after LAST entry to if statement
+        endif
+        
+        if _eps_max(_n) < 0.01               ; 1% shear strain
+            _Liq_2(_n) = _cycNum(_n) + 0.5
+        endif
+        
+        if _eps_max(_n) < 0.03               ; 3% shear strain
+            _Liq_3(_n) = _cycNum(_n) + 0.5
+        endif        
+        
+        if _eps_max(_n) < 0.075              ; 7.5% shear strain
+            _Liq_4(_n) = _cycNum(_n) + 0.5
+        endif
+
+        if _eps_max(_n) > _maxStrain
+            command
+                zone face apply velocity-z 0.0 range group [_name] group 'Top'
+            endcommand
+        endif
+    endloop
+end
+;--------------------------------------------------------------------------------------------------
+;   Impose cyclic loading
+;   -  Solve for his_steps prior to shearing so the histories include the the initial conditions
+;
+model dynamic time-total 0.0
+
+zone face apply velocity-z [-_capVel] range group 'Top'
+
+fish define _CSR_loading
+    _time_incr = 0.005 / _capVel ; Time increment to reach .5% strain in elements.
+    loop _nt (1,1000000)
+        if _eps_max(1) < _maxStrain
+            if _cycNum(1) < _maxCycles
+                _time = dynamic.time.total + _time_incr
+                command
+                    model solve time-total [_time]
+                endcommand
+            endif
+        endif
+    endloop
+end
+
+;fish callback add @_CSR_control 99 ;after end of step, before extra_variables and table_terms are stored
+fish callback add @_CSR_control -100 ;very very very beginning
+[_CSR_loading]
+
+;--------------------------------------------------------------------------------------------------
+;   Interpolate (approximately) a smooth "cycle number" as a float rather than stepped integer
+;   From DSS driver
+;
+fish def _interpCycNum
+    loop _n (1,5)
+        _tab1  = 9*_n-8
+        _numRows = table.size(_tab1)
+        _ifirst = 1
+        _firstN = table.x(_tab1,_ifirst)
+        
+        loop _ih (1,_numRows)
+            _tempN = table.x(_tab1,_ih) - 0.25
+            if _tempN > _firstN | _ih == _numrows
+                if _ih == _numrows
+                    _tempN = table.x(_tab1,_ih)
+                end_if               
+                _ilast = _ih
+                _lastN = _tempN
+                loop _ifix (_ifirst,_ilast)
+                    table.x(_tab1,_ifix) = _firstN + (_lastN - _firstN)*(_ifix - _ifirst)/ (_ilast - _ifirst)
+                end_loop
+                _firstN = _lastN
+                _ifirst = _ilast
+            end_if
+        end_loop
+
+    end_loop
+end
+[_interpCycNum]
+;--------------------------------------------------------------------------------------------------
+;   Outputting of time histories for the 5 elements
+;
+fish def _result_files 
+    _size = table.size(1)
+
+    loop _n (1,5) 
+        _file = _basefile + string(_n) + '.csv' 
+        _check = file.open.check(_file,'write','text')
+        if _check
+            _filePtr = file.open(_file,'write','text')
+        endif
+
+        _data = list.create(1) ; Used again later. Set here to match table below. 
+        _data(1) =            'cycNum,esxx,esyy,eszz,eps_xx,eps_yy,eps_zz,'
+        _data(1) = _data(1) + 'sig_xy,sig_xz,sig_yz,pRatio,stress_ratio,pp,'
+        _data(1) = _data(1) + 'p,q/2,ru,vol_strain,time'
+        
+        if _check;
+           _status = file.write(_data,_filePtr) 
+        endif       
+
+        _tab1  = 9*_n-8
+        _tab2  = 9*_n-7 
+        _tab3  = 9*_n-6
+        _tab4  = 9*_n-5
+        _tab5  = 9*_n-4
+        _tab6  = 9*_n-3
+        _tab7  = 9*_n-2
+        _tab8  = 9*_n-1
+        _tab9  = 9*_n
+               
+        loop _i (1,_size) 
+            _data(1) =            string.build('%1,%2,' ,table.x(_tab1,_i), table.y(_tab1,_i))
+            _data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab2,_i), table.y(_tab2,_i))        
+            _data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab3,_i), table.y(_tab3,_i))
+            _data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab4,_i), table.y(_tab4,_i))
+            _data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab5,_i), table.y(_tab5,_i))
+            _data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab6,_i), table.y(_tab6,_i))
+            _data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab7,_i), table.y(_tab7,_i))
+            _data(1) = _data(1) + string.build('%1,%2,' ,table.x(_tab8,_i), table.y(_tab8,_i))
+            _data(1) = _data(1) + string.build('%1,%2'  ,table.x(_tab9,_i), table.y(_tab9,_i))
+            
+            if _status
+                _status = file.write(_data,_filePtr) 
+            endif 
+        endloop 
+        
+        _status = file.close(_filePtr)
+    endloop 
+end        
+[_result_files]
+;-----------------------------------------------------------------------------------------------
+;   Outputting the summary file
+;
+fish def _CRR_N_summary 
+    _file  = _basefile + 'csrN.csv' 
+    _check = file.open.check(_file,'write','text')
+    if _check
+        _filePtr = file.open(_file,'write','text')
+    endif
+    _data = list.create(1) 
+    _data(1) = 'CSR,Ncyc_to_98%_ru,Ncyc_to_1%_strain,Ncyc_to_3%_strain,Ncyc_to_7.5%_strain'
+    if _check
+       _status = file.write(_data,_filePtr) 
+    endif   
+    loop _n (1,5)
+         _data(1)    = string.build('%1,%2,%3,%4,%5',_CSR_limit(_n),_Liq_1(_n),_Liq_2(_n),_Liq_3(_n),_Liq_4(_n))
+         if _status
+            _status = file.write(_data,_filePtr) 
+         endif 
+         table.x(100,_n) = _Liq_1(_n)
+         table.y(100,_n) = _CSR_limit(_n)
+         table.x(101,_n) = _Liq_2(_n)
+         table.y(101,_n) = _CSR_limit(_n)
+         table.x(102,_n) = _Liq_3(_n)
+         table.y(102,_n) = _CSR_limit(_n)
+         table.x(103,_n) = _Liq_4(_n)
+         table.y(103,_n) = _CSR_limit(_n)
+    endloop 
+    _status = file.close(_filePtr)
+end 
+[_CRR_N_summary]
+;--------------------------------------------------------------------------------------------------
+;model save "sheared"

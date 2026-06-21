@@ -1,7 +1,8 @@
 # PM4Sand3D_drivers_auto
 ## Scripts that produce multiple PM4Sand3D drivers for different loading paths, batch files for running them in FLAC 3D/9.X, and post-processing codes for plotting
-### Original versions of processing and plotting files created by M-P Kippen in the framework of the PM4Sand3D development, May 2021
 
+#### Original versions of 'processing_plotting' files created by M-P Kippen in the framework of the PM4Sand3D development, May 2021
+#### batched versions of original drivers created by K Ziotopoulou
 ### v1.0 June 2026
 
 ### Structure
